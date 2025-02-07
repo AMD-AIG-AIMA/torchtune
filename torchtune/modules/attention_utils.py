@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import logging
 from typing import Callable, List, Optional, Union
 
@@ -12,8 +13,25 @@ import torch
 from torch import nn
 from torchtune.utils._import_guard import _SUPPORTS_FLEX_ATTENTION
 from torchtune.utils._logging import get_logger, log_once
+from typing import Tuple
 
 _log: logging.Logger = get_logger()
+
+
+if os.environ.get("FLASH_ATTN_AVAILABLE", True):
+    try:
+        from flash_attn import flash_attn_func, flash_attn_varlen_func
+        from flash_attn.bert_padding import pad_input, unpad_input
+    except ModuleNotFoundError:
+        log_once(_log, "Not using flash_attn.", level=logging.DEBUG)
+        flash_attn_func = None
+else:
+    flash_attn_func = None
+
+
+def is_flash_attn_available():
+    return flash_attn_func is not None
+
 
 if _SUPPORTS_FLEX_ATTENTION:
     from torch.nn.attention.flex_attention import (
@@ -40,6 +58,60 @@ if _SUPPORTS_FLEX_ATTENTION:
     _MaskType = Union[torch.Tensor, BlockMask]
 else:
     _MaskType = torch.Tensor
+
+
+def _unpad_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_mask: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor, int], Tuple[torch.Tensor, torch.Tensor, int]]:
+    """
+    """
+    batch_size, q_max_seqlen, k_max_seqlen = attn_mask.shape
+    q_mask = attn_mask.any(dim=2) #sum(dim=2).to(torch.bool)
+    kv_mask = attn_mask.any(dim=1) #sum(dim=1).to(torch.bool)
+    q_flat, q_indices, q_cu_seqlens, q_max_seqlen, q_used_seqlens  = unpad_input(q, q_mask)
+    k_flat, k_indices, k_cu_seqlens, k_max_seqlen, k_used_seqlens  = unpad_input(k, kv_mask)
+    v_flat, v_indices, v_cu_seqlens, v_max_seqlen, v_used_seqlens  = unpad_input(v, kv_mask)
+    return (
+        q_flat, k_flat, v_flat,
+        (q_indices, q_cu_seqlens, q_max_seqlen),
+        (k_indices, k_cu_seqlens, k_max_seqlen),
+    )
+
+
+# converts tensors from sdpa format to fa format
+def _flash_attn_wrapper(q, k, v, attn_mask, dropout_p, is_causal):
+    q=q.transpose(1, 2) # Transpose to (N, L, H, E)
+    k=k.transpose(1, 2) # Transpose to (N, L, H, E)
+    v=v.transpose(1, 2) # Transpose to (N, L, H, E)
+    if attn_mask is not None and attn_mask.numel() > attn_mask.sum():
+        batch_size, q_len  = q.shape[:2]
+        query_states, key_states, value_states, mask_info_q, mask_info_kv  = _unpad_inputs(
+            q, k, v, attn_mask,
+        )
+        indices_q, cu_seqlens_q, max_seqlen_q = mask_info_q
+        indices_k, cu_seqlens_k, max_seqlen_k = mask_info_kv
+        attn_output_unpad = flash_attn_varlen_func(
+            query_states,
+            key_states,
+            value_states,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            dropout_p=dropout_p,
+            causal=is_causal,
+        )
+        out = pad_input(attn_output_unpad, indices_q, batch_size, q_len)
+    else:
+        out = flash_attn_func(
+            q, k, v,
+            dropout_p=dropout_p,
+            causal=is_causal,
+        )
+    return out.transpose(1, 2)  # Transpose back to (N, H, L, E)
 
 
 def _get_document_ids_from_seq_lens(
@@ -182,6 +254,7 @@ def _sdpa_or_flex_attention() -> Callable:
             mask: Optional[_MaskType],
             dropout_p: float,
             is_causal: bool,
+            with_kv_cache: bool,
         ) -> torch.Tensor:
 
             # Flex attention uses the BlockMask
@@ -208,6 +281,52 @@ def _sdpa_or_flex_attention() -> Callable:
                 )
             # If mask is a standard boolean tensor or None, then use SDPA
             else:
+                if is_flash_attn_available() and not with_kv_cache:
+                    log_once(_log, "Using flash_attn", level=logging.DEBUG)
+                    return _flash_attn_wrapper(
+                        q,
+                        k,
+                        v,
+                        attn_mask=mask,
+                        dropout_p=dropout_p,
+                        is_causal=is_causal,
+                    )
+                else:
+                    # shape: [b, 1, s, s]
+                    if mask is not None:
+                        mask = mask[:, None, :, :]
+
+                    # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
+                    return nn.functional.scaled_dot_product_attention(
+                        q,
+                        k,
+                        v,
+                        attn_mask=mask,
+                        dropout_p=dropout_p,
+                        is_causal=is_causal,
+                    )
+
+    else:
+        def _attention_call(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            mask: Optional[_MaskType],
+            dropout_p: float,
+            is_causal: bool,
+            with_kv_cache: bool,
+        ) -> torch.Tensor:
+            if is_flash_attn_available() and not with_kv_cache:
+                log_once(_log, "Using flash_attn", level=logging.DEBUG)
+                return _flash_attn_wrapper(
+                    q,
+                    k,
+                    v,
+                    attn_mask=mask,
+                    dropout_p=dropout_p,
+                    is_causal=is_causal,
+                )
+            else:
                 # shape: [b, 1, s, s]
                 if mask is not None:
                     mask = mask[:, None, :, :]
@@ -221,29 +340,5 @@ def _sdpa_or_flex_attention() -> Callable:
                     dropout_p=dropout_p,
                     is_causal=is_causal,
                 )
-
-    else:
-
-        def _attention_call(
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            mask: Optional[_MaskType],
-            dropout_p: float,
-            is_causal: bool,
-        ) -> torch.Tensor:
-            # shape: [b, 1, s, s]
-            if mask is not None:
-                mask = mask[:, None, :, :]
-
-            # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
-            return nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=mask,
-                dropout_p=dropout_p,
-                is_causal=is_causal,
-            )
 
     return _attention_call
