@@ -212,7 +212,25 @@ def padded_collate_sft(
             (0, labels_seq_len - input_ids_seq_len),
             value=padding_idx,
         )
-    return {"tokens": input_ids.long(), "labels": labels.long()}
+    
+    collated_text = {"tokens": input_ids.long(), "labels": labels.long()}
+
+    # FAv3 implementation requires seq_len divisible by 64
+    max_seq_len = collated_text["tokens"].shape[-1]
+    new_max_seq_len = (max_seq_len//64+1) * 64
+
+    if new_max_seq_len > max_seq_len:
+        collated_text["tokens"] = F.pad(
+            collated_text["tokens"],
+            (0, new_max_seq_len - max_seq_len),
+            value=padding_idx,
+        )
+        if "labels" in collated_text:
+            collated_text["labels"] = F.pad(
+                collated_text["labels"], (0, new_max_seq_len - max_seq_len), value=ignore_idx
+            )
+
+    return collated_text
 
 
 # TODO: Generalize this to support any type of encoder input, right now this assumes
@@ -346,6 +364,23 @@ def padded_collate_tiled_images_and_mask(
             )
         }
 
+    # FAv3 implementation requires seq_len divisible by 64
+    max_seq_len = collated_text["tokens"].shape[-1]
+    new_max_seq_len = (max_seq_len//64) * 64
+
+    if new_max_seq_len != max_seq_len:
+        new_max_seq_len += 64
+        collated_text["tokens"] = F.pad(
+            collated_text["tokens"],
+            (0, new_max_seq_len - max_seq_len),
+            value=padding_idx,
+        )
+        if "labels" in collated_text:
+            collated_text["labels"] = F.pad(
+                collated_text["labels"], (0, new_max_seq_len - max_seq_len),
+                value=ignore_idx,
+            )
+
     max_seq_len = collated_text["tokens"].shape[-1]
     bsz = len(batch)
 
@@ -420,7 +455,7 @@ def padded_collate_tiled_images_and_mask(
     collated_aspect_ratios = pad_sequence(
         batch_aspect_ratios, batch_first=True, padding_value=1
     )
-
+    
     # Concatenate masks for multiple images across image_seq_len dimension
     concat_masks = collated_masks.view(bsz, max_seq_len, -1)
     if pad_max_images is not None:
@@ -438,7 +473,6 @@ def padded_collate_tiled_images_and_mask(
         },
         "encoder_mask": concat_masks,
     }
-
     if "labels" in collated_text:
         batch_dict["labels"] = collated_text["labels"]
 
