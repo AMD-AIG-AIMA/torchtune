@@ -3,6 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import os
 import copy
 from typing import Callable, Dict, List, Optional, Union
 
@@ -11,6 +12,10 @@ from torch import nn
 from torchtune.modules import MultiHeadAttention
 from torchtune.modules.attention_utils import _MaskType
 
+if os.environ.get("ENABLE_CROSS_ATTENTION_MASKING", False):
+    ENABLE_CROSS_ATTENTION_MASKING = True
+else:
+    ENABLE_CROSS_ATTENTION_MASKING = False
 
 class TransformerSelfAttentionLayer(nn.Module):
     """
@@ -281,7 +286,10 @@ class TransformerCrossAttentionLayer(nn.Module):
             # TODO: remove after PyTorch 2.5 is released
             # This unmasks the skipped rows to avoid NaNs in SDPA Softmax backward
             # This doesn't affect the output since outputs are masked out later
-            encoder_mask = encoder_mask.masked_fill(skip_mask, True)
+            if ENABLE_CROSS_ATTENTION_MASKING:
+                encoder_mask = encoder_mask.masked_fill(skip_mask, False)
+            else:
+                encoder_mask = encoder_mask.masked_fill(skip_mask, True)
 
         # Input tensor and attention output have the same shape
         # [b, s, d]
