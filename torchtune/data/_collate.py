@@ -212,7 +212,6 @@ def padded_collate_sft(
             (0, labels_seq_len - input_ids_seq_len),
             value=padding_idx,
         )
-    
     return {"tokens": input_ids.long(), "labels": labels.long()}
 
 
