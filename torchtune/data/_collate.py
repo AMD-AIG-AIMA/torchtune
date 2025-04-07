@@ -213,9 +213,7 @@ def padded_collate_sft(
             value=padding_idx,
         )
     
-    collated_text = {"tokens": input_ids.long(), "labels": labels.long()}
-
-    return collated_text
+    return {"tokens": input_ids.long(), "labels": labels.long()}
 
 
 # TODO: Generalize this to support any type of encoder input, right now this assumes
@@ -423,7 +421,7 @@ def padded_collate_tiled_images_and_mask(
     collated_aspect_ratios = pad_sequence(
         batch_aspect_ratios, batch_first=True, padding_value=1
     )
-    
+
     # Concatenate masks for multiple images across image_seq_len dimension
     concat_masks = collated_masks.view(bsz, max_seq_len, -1)
     if pad_max_images is not None:
@@ -441,6 +439,7 @@ def padded_collate_tiled_images_and_mask(
         },
         "encoder_mask": concat_masks,
     }
+
     if "labels" in collated_text:
         batch_dict["labels"] = collated_text["labels"]
 
