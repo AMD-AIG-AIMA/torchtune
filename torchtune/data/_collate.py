@@ -215,22 +215,6 @@ def padded_collate_sft(
     
     collated_text = {"tokens": input_ids.long(), "labels": labels.long()}
 
-    # # FAv3 implementation requires seq_len divisible by 64
-    # max_seq_len = collated_text["tokens"].shape[-1]
-    # new_max_seq_len = (max_seq_len//64) * 64
-
-    # if new_max_seq_len != max_seq_len:
-    #     new_max_seq_len += 64
-    #     collated_text["tokens"] = F.pad(
-    #         collated_text["tokens"],
-    #         (0, new_max_seq_len - max_seq_len),
-    #         value=padding_idx,
-    #     )
-    #     if "labels" in collated_text:
-    #         collated_text["labels"] = F.pad(
-    #             collated_text["labels"], (0, new_max_seq_len - max_seq_len), value=ignore_idx
-    #         )
-
     return collated_text
 
 
@@ -364,23 +348,6 @@ def padded_collate_tiled_images_and_mask(
                 padding_value=padding_idx,
             )
         }
-
-    # # FAv3 implementation requires seq_len divisible by 64
-    # max_seq_len = collated_text["tokens"].shape[-1]
-    # new_max_seq_len = (max_seq_len//64) * 64
-
-    # if new_max_seq_len != max_seq_len:
-    #     new_max_seq_len += 64
-    #     collated_text["tokens"] = F.pad(
-    #         collated_text["tokens"],
-    #         (0, new_max_seq_len - max_seq_len),
-    #         value=padding_idx,
-    #     )
-    #     if "labels" in collated_text:
-    #         collated_text["labels"] = F.pad(
-    #             collated_text["labels"], (0, new_max_seq_len - max_seq_len),
-    #             value=ignore_idx,
-    #         )
 
     max_seq_len = collated_text["tokens"].shape[-1]
     bsz = len(batch)
