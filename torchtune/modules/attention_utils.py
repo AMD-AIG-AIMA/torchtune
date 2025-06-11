@@ -11,6 +11,7 @@ from typing import Callable, List, Optional, Union
 import torch
 
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torchtune.utils._import_guard import _SUPPORTS_FLEX_ATTENTION
 from torchtune.utils._logging import get_logger, log_once
 from typing import Tuple
@@ -60,6 +61,31 @@ else:
     _MaskType = torch.Tensor
 
 
+def _check(attn_mask: torch.Tensor) -> torch.bool:
+    """
+    Checks if attn_mask is compatible with flash_attn_wrapper.
+
+    Args:
+        attn_mask (torch.Tensor): attention mask of shape
+            (batch_size, max_q_seqlen, max_kv_seqlen)
+
+    Returns:
+        is_invalid (torch.bool): True if incompatible with flash_attn_wrapper
+    """
+    n_rows, n_cols = attn_mask.shape[-2:]
+    n_null_rows = (~attn_mask).all(dim=-1).sum(dim=-1)
+    n_null_cols = (~attn_mask).all(dim=-2).sum(dim=-1)
+    is_invalid = (
+        attn_mask.numel() - (
+            n_cols * n_null_rows.sum() +
+            n_rows * n_null_cols.sum() -
+            (n_null_rows * n_null_cols).sum()
+        )
+    ) > attn_mask.sum()
+
+    return is_invalid
+
+
 def _unpad_inputs(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -87,6 +113,9 @@ def _flash_attn_wrapper(q, k, v, attn_mask, dropout_p, is_causal):
     k=k.transpose(1, 2) # Transpose to (N, L, H, E)
     v=v.transpose(1, 2) # Transpose to (N, L, H, E)
     if attn_mask is not None and attn_mask.numel() > attn_mask.sum():
+       if _check(attn_mask):
+            raise ValueError("invalid 'attn_mask' found")
+
         batch_size, q_len  = q.shape[:2]
         query_states, key_states, value_states, mask_info_q, mask_info_kv  = _unpad_inputs(
             q, k, v, attn_mask,
@@ -283,14 +312,51 @@ def _sdpa_or_flex_attention() -> Callable:
             else:
                 if is_flash_attn_available() and not with_kv_cache:
                     log_once(_log, "Using flash_attn", level=logging.DEBUG)
-                    return _flash_attn_wrapper(
-                        q,
-                        k,
-                        v,
-                        attn_mask=mask,
-                        dropout_p=dropout_p,
-                        is_causal=is_causal,
-                    )
+                    try:
+                        output = _flash_attn_wrapper(
+                            q,
+                            k,
+                            v,
+                            attn_mask=mask,
+                            dropout_p=dropout_p,
+                            is_causal=is_causal,
+                        )
+                    except ValueError:
+                        log_once(
+                            _log,
+                            (
+                                "Invalid 'attn_mask' in flash_attn_wrapper, resorting "
+                                "to 'scaled_dot_product_attention'"
+                            ),
+                            level=logging.DEBUG
+                        )
+                        mask = mask[:, None, :, :]
+
+                        try:
+                            output = nn.functional.scaled_dot_product_attention(
+                                q,
+                                k,
+                                v,
+                                attn_mask=mask,
+                                dropout_p=dropout_p,
+                                is_causal=is_causal,
+                            )
+                        except Exception:
+                            log_once(
+                                _log,
+                                "Using SDPBackend.MATH",
+                                level=logging.DEBUG
+                            )
+                            with sdpa_kernel(SDPBackend.MATH):
+                                output = nn.functional.scaled_dot_product_attention(
+                                    q,
+                                    k,
+                                    v,
+                                    attn_mask=mask,
+                                    dropout_p=dropout_p,
+                                    is_causal=is_causal,
+                                )
+                    return output
                 else:
                     # shape: [b, 1, s, s]
                     if mask is not None:
@@ -318,14 +384,51 @@ def _sdpa_or_flex_attention() -> Callable:
         ) -> torch.Tensor:
             if is_flash_attn_available() and not with_kv_cache:
                 log_once(_log, "Using flash_attn", level=logging.DEBUG)
-                return _flash_attn_wrapper(
-                    q,
-                    k,
-                    v,
-                    attn_mask=mask,
-                    dropout_p=dropout_p,
-                    is_causal=is_causal,
-                )
+                try:
+                    output = _flash_attn_wrapper(
+                        q,
+                        k,
+                        v,
+                        attn_mask=mask,
+                        dropout_p=dropout_p,
+                        is_causal=is_causal,
+                    )
+                except ValueError:
+                    log_once(
+                        _log,
+                        (
+                            "Invalid 'attn_mask' in flash_attn_wrapper, resorting "
+                                "to 'scaled_dot_product_attention'"
+                        ),
+                        level=logging.DEBUG
+                    )
+                    mask = mask[:, None, :, :]
+
+                    try:
+                        output = nn.functional.scaled_dot_product_attention(
+                            q,
+                            k,
+                            v,
+                            attn_mask=mask,
+                            dropout_p=dropout_p,
+                            is_causal=is_causal,
+                        )
+                    except Exception:
+                        log_once(
+                            _log,
+                            "Using SDPBackend.MATH",
+                            level=logging.DEBUG
+                        )
+                        with sdpa_kernel(SDPBackend.MATH):
+                            output = nn.functional.scaled_dot_product_attention(
+                                q,
+                                k,
+                                v,
+                                attn_mask=mask,
+                                dropout_p=dropout_p,
+                                is_causal=is_causal,
+                            )
+                return output
             else:
                 # shape: [b, 1, s, s]
                 if mask is not None:
