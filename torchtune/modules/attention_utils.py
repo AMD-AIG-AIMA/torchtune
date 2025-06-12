@@ -113,7 +113,7 @@ def _flash_attn_wrapper(q, k, v, attn_mask, dropout_p, is_causal):
     k=k.transpose(1, 2) # Transpose to (N, L, H, E)
     v=v.transpose(1, 2) # Transpose to (N, L, H, E)
     if attn_mask is not None and attn_mask.numel() > attn_mask.sum():
-       if _check(attn_mask):
+        if _check(attn_mask):
             raise ValueError("invalid 'attn_mask' found")
 
         batch_size, q_len  = q.shape[:2]
@@ -322,13 +322,11 @@ def _sdpa_or_flex_attention() -> Callable:
                             is_causal=is_causal,
                         )
                     except ValueError:
-                        log_once(
-                            _log,
+                        _log.debug(
                             (
                                 "Invalid 'attn_mask' in flash_attn_wrapper, resorting "
                                 "to 'scaled_dot_product_attention'"
-                            ),
-                            level=logging.DEBUG
+                            )
                         )
                         mask = mask[:, None, :, :]
 
@@ -342,10 +340,8 @@ def _sdpa_or_flex_attention() -> Callable:
                                 is_causal=is_causal,
                             )
                         except Exception:
-                            log_once(
-                                _log,
+                            _log.debug(
                                 "Using SDPBackend.MATH",
-                                level=logging.DEBUG
                             )
                             with sdpa_kernel(SDPBackend.MATH):
                                 output = nn.functional.scaled_dot_product_attention(
@@ -394,13 +390,11 @@ def _sdpa_or_flex_attention() -> Callable:
                         is_causal=is_causal,
                     )
                 except ValueError:
-                    log_once(
-                        _log,
+                    _log.debug(
                         (
                             "Invalid 'attn_mask' in flash_attn_wrapper, resorting "
-                                "to 'scaled_dot_product_attention'"
-                        ),
-                        level=logging.DEBUG
+                            "to 'scaled_dot_product_attention'"
+                        )
                     )
                     mask = mask[:, None, :, :]
 
@@ -414,10 +408,8 @@ def _sdpa_or_flex_attention() -> Callable:
                             is_causal=is_causal,
                         )
                     except Exception:
-                        log_once(
-                            _log,
+                        _log.debug(
                             "Using SDPBackend.MATH",
-                            level=logging.DEBUG
                         )
                         with sdpa_kernel(SDPBackend.MATH):
                             output = nn.functional.scaled_dot_product_attention(
