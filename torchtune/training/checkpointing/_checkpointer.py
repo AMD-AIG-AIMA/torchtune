@@ -431,13 +431,6 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         self._safe_serialization = safe_serialization
         self._checkpoint_dir = checkpoint_dir
         self._model_type = ModelType[model_type]
-<<<<<<< HEAD
-        self._output_dir = Path(output_dir)
-        check_outdir_not_in_ckptdir(
-            ckpt_dir=self._checkpoint_dir, out_dir=self._output_dir
-        )
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-=======
         self._enable_dcp = enable_dcp
         self._fs, _ = url_to_fs(self._checkpoint_dir)
         self._output_dir = output_dir
@@ -453,7 +446,6 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                     f"Got {self._fs} and {output_fs} instead."
                 )
             self._fs.mkdirs(output_dir, exist_ok=True)
->>>>>>> main
 
         # weight_map contains the state_dict key -> checkpoint file mapping so we can correctly
         # parition the state dict into output checkpoint files. This is updated during checkpoint
@@ -461,17 +453,11 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         self._weight_map: Dict[str, str] = None
 
         # the config.json file contains model params needed for state dict conversion
-<<<<<<< HEAD
-        self._config = json.loads(
-            Path.joinpath(self._checkpoint_dir, "config.json").read_text()
-        )
-=======
         self._config = None
         with self._fs.open(
             os.path.join(self._checkpoint_dir, "config.json"), "r"
         ) as json_file:
             self._config = json.loads(json_file.read())
->>>>>>> main
 
         # repo_id is necessary for when saving an adapter config, so its compatible with HF.
         # This json file is produced and saved in the download step.
@@ -1008,11 +994,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         # So its easy to run inference with the model using this epoch's checkpoint
         copy_files(
             self._checkpoint_dir,
-<<<<<<< HEAD
-            Path.joinpath(self._output_dir, f"epoch_{epoch}"),
-=======
             os.path.join(self._output_dir, output_dirname),
->>>>>>> main
             ignore_suffixes=SUFFIXES_TO_NOT_COPY,
         )
 

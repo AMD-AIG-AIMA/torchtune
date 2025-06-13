@@ -366,7 +366,7 @@ class VisionTransformer(nn.Module):
 
         # insert cls token
         x = self.cls_token_embedding(x)
-        n_tokens += 1 
+        n_tokens += 1
 
         # token_pos_embedding
         x = self.token_pos_embedding(x, aspect_ratio)

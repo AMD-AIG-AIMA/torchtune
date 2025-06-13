@@ -9,8 +9,6 @@
 
 output_dir: ./
 
-output_dir: ./ # Not needed
-
 # Model arguments
 model:
   _component_: torchtune.models.llama3_2_vision.llama3_2_vision_11b
