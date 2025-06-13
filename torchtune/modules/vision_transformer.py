@@ -374,6 +374,11 @@ class VisionTransformer(nn.Module):
         # norm
         x = self.ln_pre(x)
 
+        # dummy padding for FAv3 ASM kernel: make seqlen divisible by 64
+        n_repeat = (64 - (n_tokens % 64)) % 64
+        x = torch.cat([x, torch.zeros((bsz_and_n_imgs, n_tiles, n_repeat, embed_dim), dtype=x.dtype, device=x.device)], dim=2)
+        n_tokens += n_repeat
+
         # transformer with optional hidden layer outputs
         x = x.reshape(bsz_and_n_imgs, n_tiles * n_tokens, embed_dim)
         for layer_idx, transformer_layer in enumerate(self.layers):
