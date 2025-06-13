@@ -264,6 +264,18 @@ def packed_block_causal_mask(
         return create_block_causal_mask(seq_lens=seq_lens)
 
 
+def _skip_mask(mask: torch.Tensor) -> torch.Tensor:
+    # negate mask and convert to boolean mask
+    if mask.dtype == torch.bool:
+        mask = ~mask
+    else:
+        mask = torch.isneginf(mask)
+    # True where all elements in a row are True
+    mask = torch.all(mask, dim=-1, keepdim=True)
+
+    return mask
+
+
 def _sdpa_or_flex_attention() -> Callable:
     """
     Helper function to decide when to call flex attention or SDPA. It will use
@@ -328,7 +340,10 @@ def _sdpa_or_flex_attention() -> Callable:
                                 "to 'scaled_dot_product_attention'"
                             )
                         )
-                        mask = mask[:, None, :, :]
+                        if mask is not None:
+                            skip_mask = _skip_mask(mask)
+                            mask = mask.masked_fill(skip_mask, True)
+                            mask = mask[:, None, :, :]
 
                         try:
                             output = nn.functional.scaled_dot_product_attention(
@@ -396,7 +411,10 @@ def _sdpa_or_flex_attention() -> Callable:
                             "to 'scaled_dot_product_attention'"
                         )
                     )
-                    mask = mask[:, None, :, :]
+                    if mask is not None:
+                        skip_mask = _skip_mask(mask)
+                        mask = mask.masked_fill(skip_mask, True)
+                        mask = mask[:, None, :, :]
 
                     try:
                         output = nn.functional.scaled_dot_product_attention(

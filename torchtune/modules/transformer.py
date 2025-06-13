@@ -12,10 +12,6 @@ from torch import nn
 from torchtune.modules import MultiHeadAttention
 from torchtune.modules.attention_utils import _MaskType
 
-if os.environ.get("ENABLE_CROSS_ATTENTION_MASKING", False):
-    ENABLE_CROSS_ATTENTION_MASKING = True
-else:
-    ENABLE_CROSS_ATTENTION_MASKING = False
 
 class TransformerSelfAttentionLayer(nn.Module):
     """
