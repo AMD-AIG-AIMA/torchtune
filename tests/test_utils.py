@@ -8,24 +8,20 @@ import math
 import os
 import re
 import sys
-import unittest
 from contextlib import contextmanager
 from functools import partial
 from io import StringIO
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Mapping, Optional, TextIO, Tuple, Union
+from typing import Any, Generator, List, Mapping, Optional, TextIO, Tuple, Union
 
 import pytest
 
 import torch
 from torch import nn
 from torchtune.data import Message, PromptTemplate, truncate
-from torchtune.modules.tokenizers import ModelTokenizer
 from torchtune.modules.transforms import Transform
+from torchtune.modules.transforms.tokenizers import ModelTokenizer
 
-skip_if_cuda_not_available = unittest.skipIf(
-    not torch.cuda.is_available(), "CUDA is not available"
-)
 
 CKPT_MODEL_PATHS = {
     "llama2_tune": "/tmp/test-artifacts/small-ckpt-tune-03082024.pt",
@@ -36,6 +32,7 @@ CKPT_MODEL_PATHS = {
     "llama2_7b": "/tmp/test-artifacts/llama2-7b-torchtune.pt",
     "llama3_2_vision_hf": "/tmp/test-artifacts/small-ckpt-hf-vision-10172024.pt",
     "llama3_2_vision_meta": "/tmp/test-artifacts/small-ckpt-meta-vision-10172024.pt",
+    "llama3_137M": "/tmp/test-artifacts/llama3-hf-04232025/model.safetensors",
 }
 
 TOKENIZER_PATHS = {
@@ -55,14 +52,17 @@ MESSAGE_SAMPLE_TRAIN_ON_INPUT = [
     Message(
         role="system",
         content=CHAT_SAMPLE["system"],
+        masked=True,
     ),
     Message(
         role="user",
         content=CHAT_SAMPLE["user"],
+        masked=False,
     ),
     Message(
         role="assistant",
         content=CHAT_SAMPLE["assistant"],
+        masked=False,
     ),
 ]
 
@@ -72,7 +72,24 @@ MESSAGE_SAMPLE = [
     Message(
         role="assistant",
         content=CHAT_SAMPLE["assistant"],
+        masked=False,
     ),
+]
+
+MESSAGE_SAMPLE_TRAIN_ON_ASSISTANT = [
+    Message(role="system", content=CHAT_SAMPLE["system"], masked=True),
+    Message(role="user", content=CHAT_SAMPLE["user"], masked=True),
+    Message(role="assistant", content=CHAT_SAMPLE["assistant"], masked=False),
+    Message(role="user", content=CHAT_SAMPLE["user"], masked=True),
+    Message(role="assistant", content=CHAT_SAMPLE["assistant"], masked=False),
+]
+
+MESSAGE_SAMPLE_TRAIN_ON_LAST = [
+    Message(role="system", content=CHAT_SAMPLE["system"], masked=True),
+    Message(role="user", content=CHAT_SAMPLE["user"], masked=True),
+    Message(role="assistant", content=CHAT_SAMPLE["assistant"], masked=True),
+    Message(role="user", content=CHAT_SAMPLE["user"], masked=True),
+    Message(role="assistant", content=CHAT_SAMPLE["assistant"], masked=False),
 ]
 
 
@@ -247,6 +264,15 @@ def assert_expected(
     )
 
 
+def assert_expected_dict(actual_dict, expected_dict, rtol=1e-5, atol=1e-8):
+    for k in expected_dict:
+        if isinstance(expected_dict[k], dict):
+            assert k in actual_dict and isinstance(actual_dict[k], dict)
+            assert_expected_dict(actual_dict[k], expected_dict[k])
+        else:
+            assert_expected(actual_dict[k], expected_dict[k])
+
+
 @contextmanager
 def single_box_init(init_pg: bool = True):
     env_vars = ["MASTER_ADDR", "MASTER_PORT", "LOCAL_RANK", "RANK", "WORLD_SIZE"]
@@ -308,7 +334,14 @@ def gpu_test(gpu_count: int = 1):
     return pytest.mark.skipif(local_gpu_count < gpu_count, reason=message)
 
 
-def get_loss_values_from_metric_logger(log_file_path: str) -> Dict[str, float]:
+def skip_if_lt_python_310(reason: str = "Python 3.10+ required"):
+    """
+    Annotation for tests that require Python 3.10 or higher
+    """
+    return pytest.mark.skipif(sys.version_info < (3, 10), reason=reason)
+
+
+def get_loss_values_from_metric_logger(log_file_path: str) -> List[float]:
     """
     Given an output directory containing metric logger .txt file,
     parse the .txt and return a list of losses from each logged iteration.

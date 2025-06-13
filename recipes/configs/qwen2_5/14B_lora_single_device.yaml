@@ -3,7 +3,7 @@
 #
 # This config assumes that you've run the following command before launching
 # this run:
-#   tune download Qwen/Qwen2.5-14B-Instruct --output-dir /tmp/Qwen2_5-14B-Instruct
+#   tune download Qwen/Qwen2.5-14B-Instruct --output-dir /tmp/Qwen2.5-14B-Instruct
 #
 # To launch on a single device, run the following command from root:
 #   tune run lora_finetune_single_device --config qwen2_5/14B_lora_single_device
@@ -30,23 +30,16 @@ model:
 
 tokenizer:
   _component_: torchtune.models.qwen2_5.qwen2_5_tokenizer
-  path: /tmp/Qwen2_5-14B-Instruct/vocab.json
-  merges_file: /tmp/Qwen2_5-14B-Instruct/merges.txt
+  path: /tmp/Qwen2.5-14B-Instruct/vocab.json
+  merges_file: /tmp/Qwen2.5-14B-Instruct/merges.txt
   max_seq_len: null
 
 checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer
-  checkpoint_dir: /tmp/Qwen2_5-14B-Instruct
-  checkpoint_files: [
-    model-00001-of-00008.safetensors,
-    model-00002-of-00008.safetensors,
-    model-00003-of-00008.safetensors,
-    model-00004-of-00008.safetensors,
-    model-00005-of-00008.safetensors,
-    model-00006-of-00008.safetensors,
-    model-00007-of-00008.safetensors,
-    model-00008-of-00008.safetensors,
-  ]
+  checkpoint_dir: /tmp/Qwen2.5-14B-Instruct
+  checkpoint_files:
+    filename_format: model-{}-of-{}.safetensors
+    max_filename: "00008"
   recipe_checkpoint: null
   output_dir: ${output_dir}
   model_type: QWEN2
@@ -71,12 +64,13 @@ lr_scheduler:
   num_warmup_steps: 100
 
 loss:
-  _component_: torchtune.modules.loss.CEWithChunkedOutputLoss
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
 
 # Training
 epochs: 1
 max_steps_per_epoch: null
 gradient_accumulation_steps: 8  # Use to increase effective batch size
+clip_grad_norm: null
 compile: False  # torch.compile the model + loss, True increases speed + decreases memory
 
 # Logging
@@ -85,6 +79,7 @@ metric_logger:
   log_dir: ${output_dir}/logs
 log_every_n_steps: 1
 log_peak_memory_stats: False
+log_level: INFO  # DEBUG, WARN, etc.
 
 # Environment
 device: cuda

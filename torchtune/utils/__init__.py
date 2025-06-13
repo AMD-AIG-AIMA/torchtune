@@ -10,12 +10,14 @@ from ._device import (
     get_device,
     get_device_support,
     get_torch_device_namespace,
+    get_world_size_and_rank,
 )
-from ._logging import get_logger, log_rank_zero
+from ._logging import deprecated, get_logger, log_once, log_rank_zero
 
 from ._version import torch_version_ge
 
 __all__ = [
+    "get_world_size_and_rank",
     "batch_to_device",
     "get_device",
     "get_logger",
@@ -24,4 +26,6 @@ __all__ = [
     "get_torch_device_namespace",
     "DeviceSupport",
     "log_rank_zero",
+    "deprecated",
+    "log_once",
 ]

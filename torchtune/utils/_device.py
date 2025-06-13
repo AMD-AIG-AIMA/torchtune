@@ -6,7 +6,7 @@
 
 import os
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -19,6 +19,19 @@ if _SUPPORTS_FLEX_ATTENTION:
     from torch.nn.attention.flex_attention import BlockMask
 else:
     BlockMask = torch.Tensor
+
+
+def get_world_size_and_rank() -> Tuple[int, int]:
+    """Function that gets the current world size (aka total number
+    of ranks) and rank number of the current process in the default process group.
+
+    Returns:
+        Tuple[int, int]: world size, rank
+    """
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_world_size(), torch.distributed.get_rank()
+    else:
+        return 1, 0
 
 
 def is_torch_npu_available() -> bool:
@@ -55,6 +68,7 @@ def _setup_device(device: torch.device) -> torch.device:
 
     Raises:
         RuntimeError: If device index is not available.
+        AttributeError: If ``set_device`` is not supported for the device type (e.g. on MPS).
 
     Returns:
         device
@@ -73,6 +87,10 @@ def _setup_device(device: torch.device) -> torch.device:
         raise RuntimeError(
             f"The local rank is larger than the number of available {device_name}s."
         )
+    if not hasattr(torch_device, "set_device"):
+        raise AttributeError(
+            f"The device type {device_type} does not support the `set_device` method."
+        )
     torch_device.set_device(device)
     return device
 
@@ -80,7 +98,7 @@ def _setup_device(device: torch.device) -> torch.device:
 def _get_device_type_from_env() -> str:
     """Function that gets the torch.device based on the current machine.
 
-    This currently only supports CPU, CUDA, NPU.
+    This currently only supports CPU, CUDA, NPU, XPU, and MPS.
 
     Returns:
         device
@@ -91,6 +109,8 @@ def _get_device_type_from_env() -> str:
         device = "npu"
     elif torch.xpu.is_available():
         device = "xpu"
+    elif torch.mps.is_available():
+        device = "mps"
     else:
         device = "cpu"
     return device
@@ -138,7 +158,7 @@ def get_device(device: Optional[str] = None) -> torch.device:
     If CUDA-like is available and being used, this function also sets the CUDA-like device.
 
     Args:
-        device (Optional[str]): The name of the device to use, e.g. "cuda" or "cpu" or "npu" or "xpu".
+        device (Optional[str]): The name of the device to use, one of "cuda", "cpu", "npu", "xpu", or "mps".
 
     Example:
         >>> device = get_device("cuda")
@@ -164,10 +184,11 @@ def batch_to_device(batch: dict, device: torch.device) -> None:
 
     Args:
         batch (dict): dict of Tensors or more nested dicts of tensors.
-        device (torch.device): torch device to move the tensor's too
+        device (torch.device): torch device to move the tensors to.
 
     Raises:
-        AttributeError: if batch dict contains anything other than tensors
+        ValueError: if batch dict contains anything other than ``torch.Tensor``.
+
     """
     for k, v in batch.items():
         if isinstance(v, dict):
@@ -188,8 +209,8 @@ class DeviceSupport(Enum):
     This is a simple enum for compute devices,
     This currently only supports CPU, CUDA, NPU, and XPU.
     The following enumeration defines various device configurations with attributes:
-    1. `device_type` (str): The type of device (e.g., "cpu", "cuda", "npu", "xpu").
-    2. `device_name` (str): A user-friendly name for the device (e.g., "CPU", "GPU", "NPU", "XPU").
+    1. `device_type` (str): The type of device (e.g., "cpu", "cuda", "npu", "xpu", "mps").
+    2. `device_name` (str): A user-friendly name for the device (e.g., "CPU", "GPU", "NPU", "XPU", "MPS").
     3. `communication_backend` (str): Specifies the backend used for communication on this device
     (e.g., "gloo", "nccl", "hccl", "ccl").
     """
@@ -198,6 +219,7 @@ class DeviceSupport(Enum):
     CUDA = ("cuda", "GPU", "nccl")
     NPU = ("npu", "NPU", "hccl")
     XPU = ("xpu", "XPU", "ccl")
+    MPS = ("mps", "MPS", "gloo")
 
     def __init__(
         self,
@@ -220,7 +242,7 @@ class DeviceSupport(Enum):
 def get_device_support() -> DeviceSupport:
     """function that gets the DeviceSupport with compute devices based on the current machine.
 
-    This currently only supports CPU, CUDA, NPU, XPU.
+    This currently only supports CPU, CUDA, NPU, XPU, and MPS.
 
     Returns:
         device_support: DeviceSupport

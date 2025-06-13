@@ -5,12 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 import os
 import copy
+import logging
 from typing import Callable, Dict, List, Optional, Union
 
 import torch
 from torch import nn
+from torch.distributed.fsdp import FSDPModule
 from torchtune.modules import MultiHeadAttention
 from torchtune.modules.attention_utils import _MaskType
+from torchtune.utils import get_logger, log_once
+
+logger = get_logger("DEBUG")
 
 
 class TransformerSelfAttentionLayer(nn.Module):
@@ -24,6 +29,8 @@ class TransformerSelfAttentionLayer(nn.Module):
         mlp_norm (Optional[nn.Module]): Normalization to be applied before the feed-forward layer.
         sa_scale (Optional[nn.Module]): Module to scale self-attention output.
         mlp_scale (Optional[nn.Module]): Module to scale the feed-forward output.
+        mask_mod (Optional[Callable[[_MaskType, int, int, int], _MaskType]]): A callable
+            taking a _MaskType, bsz, and seq_len, and modifying the mask (e.g. for chunked attention).
     """
 
     def __init__(
@@ -35,6 +42,7 @@ class TransformerSelfAttentionLayer(nn.Module):
         mlp_norm: Optional[nn.Module] = None,
         sa_scale: Optional[nn.Module] = None,
         mlp_scale: Optional[nn.Module] = None,
+        mask_mod: Optional[Callable[[_MaskType, int, int, int], _MaskType]] = None,
     ) -> None:
         super().__init__()
         self.attn = attn
@@ -43,6 +51,7 @@ class TransformerSelfAttentionLayer(nn.Module):
         self.mlp_norm = mlp_norm or nn.Identity()
         self.sa_scale = sa_scale or nn.Identity()
         self.mlp_scale = mlp_scale or nn.Identity()
+        self.mask_mod = mask_mod or None
 
     def setup_caches(
         self,
@@ -120,8 +129,11 @@ class TransformerSelfAttentionLayer(nn.Module):
         # [b, s, d]
         # Norm applied before self-attention
         h = self.sa_norm(x)
+        if self.mask_mod is not None:
+            # With TP we need to use a replicated tensor here
+            bsz, seq_len, *_ = h.shape
+            mask = self.mask_mod(mask=mask, bsz=bsz, seq_len=seq_len)
         attn_out = self.attn(h, h, mask=mask, input_pos=input_pos)
-
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = self.sa_scale(attn_out) + x
 
@@ -340,8 +352,9 @@ class TransformerDecoder(nn.Module):
         output_hidden_states (Optional[List[int]]): List of layers (indices) to include in the output
 
     Raises:
-        AssertionError: num_layers is set and layer is a list
-        AssertionError: num_layers is not set and layer is an nn.Module
+        AssertionError:
+            If ``num_layers`` is set and layer is a list, **or**
+            ``num_layers`` is not set and layer is an ``nn.Module``.
 
     Note:
         Arg values are checked for correctness (eg: ``attn_dropout`` belongs to [0,1])
@@ -384,6 +397,7 @@ class TransformerDecoder(nn.Module):
         self.head_dim = head_dim
         self.causal_mask = None
         self.num_output_chunks = 0
+        self.skip_linear_projection = False
 
         # attributes for KV caches during inference
         self.encoder_max_cache_seq_len = None
@@ -392,6 +406,12 @@ class TransformerDecoder(nn.Module):
     def set_num_output_chunks(self, num_output_chunks: int) -> None:
         """Used to save memory in combination with :class:`~torchtune.modules.loss.CEWithChunkedOutputLoss`.
         This should be called before the first forward pass, in the recipe."""
+        msg = (
+            "'set_num_output_chunks' is deprecated and will be removed in future versions. "
+            "Please use self.skip_linear_projection=True and do the chunking in your loss instead, "
+            "e.g. loss(weight, input, label)."
+        )
+        log_once(logger=logger, msg=msg, level=logging.WARNING)
         self.num_output_chunks = num_output_chunks
 
     def setup_caches(
@@ -414,12 +434,11 @@ class TransformerDecoder(nn.Module):
             encoder_max_seq_len (Optional[int]): maximum encoder cache sequence length.
             decoder_max_seq_len (Optional[int]): maximum decoder cache sequence length.
         """
-
         has_encoder_layers = any(
             isinstance(m, TransformerCrossAttentionLayer) for m in self.modules()
         )
         has_decoder_layers = any(
-            isinstance(l, TransformerSelfAttentionLayer) for l in self.layers
+            isinstance(m, TransformerSelfAttentionLayer) for m in self.modules()
         )
 
         if has_encoder_layers:
@@ -433,7 +452,6 @@ class TransformerDecoder(nn.Module):
                 self.decoder_max_cache_seq_len = decoder_max_seq_len
             else:
                 self.decoder_max_cache_seq_len = self.max_seq_len
-
         for layer in self.layers:
             layer.setup_caches(
                 batch_size,
@@ -475,7 +493,20 @@ class TransformerDecoder(nn.Module):
         for layer in self.layers:
             layer.reset_cache()
 
-    @torch.compiler.disable
+    @property
+    def linear_projection_weight(self) -> torch.Tensor:
+        """Returns the output weight matrix. Useful when a finer control of the output projection is needed,
+        for example when using a custom loss function or when interested in applying it to only some tokens.
+        """
+        # Accessing the weight directly will not trigger FSDP hooks
+        # to gather the full tensor so we have to unshard manually
+        if isinstance(self.output, FSDPModule):
+            self.output.unshard()
+            weight = self.output.weight.clone()
+            self.output.reshard()
+            return weight
+        return self.output.weight
+
     def chunked_output(self, last_hidden_state: torch.Tensor) -> List[torch.Tensor]:
         """
         Apply output projection in chunks. This should be applied in conjunction with
@@ -492,34 +523,52 @@ class TransformerDecoder(nn.Module):
             List[torch.Tensor]: List of num_chunks output tensors, each with shape
                 [b, seq_len/num_chunks, out_dim], where out_dim is usually the vocab size.
         """
+        msg = (
+            "'chunked_output' is deprecated and will be removed in future versions. "
+            "Use self.skip_linear_projection=True and do the chunking in your loss instead, "
+            "e.g. loss(weight, input, label)."
+        )
+        log_once(logger=logger, msg=msg, level=logging.WARNING)
         return [
             self.output(chunk)
-            for chunk in last_hidden_state.chunk(self.num_output_chunks, dim=1)
+            for chunk in last_hidden_state.tensor_split(self.num_output_chunks, dim=1)
         ]
 
     def _validate_inputs(
         self,
-        seq_len: int,
+        tokens: Optional[torch.Tensor],
         mask: Optional[torch.Tensor] = None,
         encoder_input: Optional[torch.Tensor] = None,
         encoder_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
+        input_embeds: Optional[torch.Tensor] = None,
     ):
         """
         Validates inputs for ``forward``.
         Args:
-            seq_len (int): Input tensor sequence length.
+            tokens (Optional[torch.Tensor]): input tensor with shape ``[b x s]``
             mask (Optional[torch.Tensor]): Attention mask used for inference and for sequence packing.
             encoder_input (Optional[torch.Tensor]): Encoder input for cross-attention.
             encoder_mask (Optional[torch.Tensor]): Encoder attention mask for cross-embedding attention.
             input_pos (Optional[torch.Tensor]): Input tensor position IDs.
+            input_embeds (Optional[torch.Tensor]): Input tensor embeddings (if short-circuiting token embeddings).
 
         Raises:
-            ValueError: if seq_len of x is bigger than max_seq_len
-            ValueError: if the model has caches which have been setup with self-attention layers and ``mask`` is not provided.
-            ValueError: if the model has caches which have been setup with encoder layers and ``encoder_mask`` is not provided.
-            ValueError: if the model has caches which have been setup ``input_pos`` is not provided.
+            ValueError:
+                If neither tokens nor input_embeds are passed **or**
+                If seq_len of x is bigger than max_seq_len, **or**
+                if the model has caches which have been setup with self-attention layers and ``mask`` is not provided, **or**
+                if the model has caches which have been setup with encoder layers and ``encoder_mask`` is not provided, **or**
+                if the model has caches which have been setup ``input_pos`` is not provided.
         """
+
+        if tokens is None and input_embeds is None:
+            raise ValueError(
+                "Either tokens or input_embeds must be provided to the decoder."
+            )
+
+        # input tensor of shape [b, s]
+        seq_len = tokens.shape[1] if tokens is not None else input_embeds.shape[1]
 
         if seq_len > self.max_seq_len:
             raise ValueError(
@@ -547,16 +596,17 @@ class TransformerDecoder(nn.Module):
 
     def forward(
         self,
-        tokens: torch.Tensor,
+        tokens: Optional[torch.Tensor],
         *,
         mask: Optional[_MaskType] = None,
         encoder_input: Optional[torch.Tensor] = None,
         encoder_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
+        input_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         """
         Args:
-            tokens (torch.Tensor): input tensor with shape ``[b x s]``
+            tokens (Optional[torch.Tensor]): input tensor with shape ``[b x s]``
             mask (Optional[_MaskType]): Used to mask the scores after the query-key multiplication
                 and before the softmax. This parameter is required during inference if caches have been setup.
                 Either:
@@ -582,11 +632,13 @@ class TransformerDecoder(nn.Module):
                 of each token relative to its sample when packed, shape ``[b x s]``.
                 During inference, this indicates the position of the current token.
                 This parameter is required during inference if caches have been setup. Default is None.
+            input_embeds (Optional[torch.Tensor]): Pass these instead of tokens to short-circuit token embeddings
+                and skip straight to the transformer layers. Shape ``[b x s x d]``. Default: None
 
         Returns:
-            Union[torch.Tensor, List[torch.Tensor]]: output tensor with shape ``[b x s x v]`` or a list of layer
-                output tensors defined by ``output_hidden_states`` with the
-                final output tensor appended to the list.
+            Union[torch.Tensor, List[torch.Tensor]]: output tensor with shape ``[b x s x v]`` if `self.skip_linear_projection=False`
+            and ``[b x s x d]`` otherwise, or a list of layer output tensors defined by ``output_hidden_states`` with the
+            final output tensor appended to the list.
 
         Note:
             At the very first step of inference, when the model is provided with a prompt,
@@ -609,19 +661,18 @@ class TransformerDecoder(nn.Module):
             - d_e: encoder embed dim
             - m_s: max seq len
         """
-        # input tensor of shape [b, s]
-        seq_len = tokens.shape[1]
 
         self._validate_inputs(
-            seq_len,
+            tokens=tokens,
             mask=mask,
             encoder_input=encoder_input,
             encoder_mask=encoder_mask,
             input_pos=input_pos,
+            input_embeds=input_embeds,
         )
 
         # shape: [b, s, d]
-        h = self.tok_embeddings(tokens)
+        h = self.tok_embeddings(tokens) if input_embeds is None else input_embeds
 
         hidden = []
         for i, layer in enumerate(self.layers):
@@ -636,6 +687,9 @@ class TransformerDecoder(nn.Module):
                 input_pos=input_pos,
             )
 
+        if len(self.layers) in self.output_hidden_states:
+            hidden.append(h)
+
         # shape: [b, seq_len, out_dim]
         output = self.unembed(h)
 
@@ -647,8 +701,9 @@ class TransformerDecoder(nn.Module):
     def unembed(self, h):
         # shape: [b, s, d]
         h = self.norm(h)
-
-        if self.num_output_chunks > 0:
+        if self.skip_linear_projection:
+            output = h
+        elif self.num_output_chunks > 0:
             output = self.chunked_output(h)
         else:
             # shape: [b, seq_len, out_dim]

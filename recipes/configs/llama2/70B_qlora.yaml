@@ -3,7 +3,7 @@
 #
 # This config assumes that you've run the following command before launching
 # this run:
-#   tune download meta-llama/Llama-2-70b-hf --output-dir /tmp/Llama-2-70b-hf --ignore-patterns "*.safetensors" --hf-token <HF_TOKEN>
+#   tune download meta-llama/Llama-2-70b-hf --output-dir /tmp/Llama-2-70b-hf --ignore-patterns "*.bin" --hf-token <HF_TOKEN>
 #
 # This config needs 8 GPUs to run
 #   # tune run --nproc_per_node 8 lora_finetune_distributed --config llama2/70B_qlora
@@ -34,23 +34,9 @@ tokenizer:
 checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer
   checkpoint_dir:  /tmp/Llama-2-70b-hf
-  checkpoint_files: [
-    pytorch_model-00001-of-00015.bin,
-    pytorch_model-00002-of-00015.bin,
-    pytorch_model-00003-of-00015.bin,
-    pytorch_model-00004-of-00015.bin,
-    pytorch_model-00005-of-00015.bin,
-    pytorch_model-00006-of-00015.bin,
-    pytorch_model-00007-of-00015.bin,
-    pytorch_model-00008-of-00015.bin,
-    pytorch_model-00009-of-00015.bin,
-    pytorch_model-00010-of-00015.bin,
-    pytorch_model-00011-of-00015.bin,
-    pytorch_model-00012-of-00015.bin,
-    pytorch_model-00013-of-00015.bin,
-    pytorch_model-00014-of-00015.bin,
-    pytorch_model-00015-of-00015.bin,
-  ]
+  checkpoint_files:
+    filename_format: model-{}-of-{}.safetensors
+    max_filename: "00015"
   recipe_checkpoint: null
   output_dir: ${output_dir}
   model_type: LLAMA2
@@ -77,7 +63,7 @@ lr_scheduler:
   num_warmup_steps: 100
 
 loss:
-  _component_: torchtune.modules.loss.CEWithChunkedOutputLoss
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
 
 fsdp:
   cpu_offload: False
@@ -86,6 +72,7 @@ fsdp:
 epochs: 1
 max_steps_per_epoch: null
 gradient_accumulation_steps: 1  # Use to increase effective batch size
+clip_grad_norm: null
 compile: False  # torch.compile the model + loss, True increases speed + decreases memory
 
 # Logging
@@ -94,6 +81,7 @@ metric_logger:
   log_dir: ${output_dir}/logs
 log_every_n_steps: 1
 log_peak_memory_stats: True
+log_level: INFO  # DEBUG, WARN, etc.
 
 # Environment
 device: cuda
