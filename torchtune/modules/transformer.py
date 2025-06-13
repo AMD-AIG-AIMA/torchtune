@@ -280,17 +280,24 @@ class TransformerCrossAttentionLayer(nn.Module):
         if encoder_input is None and empty_cache:
             return x
 
+        # A mask of tokens (x) with no encoder_input
+        skip_mask = self._skip_mask(encoder_mask)
+
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
         # TODO: Add support for sample packing and bring back input_pos
         attn_out = self.attn(self.ca_norm(x), encoder_input, mask=encoder_mask)
+        if skip_mask is not None:
+            attn_out = attn_out.masked_fill(skip_mask, 0)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = self.ca_scale(attn_out) + x
 
         # Norm applied before the feedforward layer
         mlp_out = self.mlp(self.mlp_norm(h))
+        if skip_mask is not None:
+            mlp_out = mlp_out.masked_fill(skip_mask, 0)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         out = h + self.mlp_scale(mlp_out)
