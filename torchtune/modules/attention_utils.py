@@ -295,6 +295,60 @@ def _skip_mask(mask: torch.Tensor) -> torch.Tensor:
     return mask
 
 
+def _safe_scaled_dot_product_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_mask: torch.Tensor,
+    dropout_p: torch.float,
+    is_causal: torch.bool,
+):
+    """Safe wrapper for computing scaled_dot_product_attention.
+    
+    Args:
+        q (torch.Tensor): query tensor of shape
+            (batch_size, nqheads, max_q_seqlen)
+        k (torch.Tensor): key tensor of shape
+            (batch_size, nkvheads, max_kv_seqlen)
+        v (torch.Tensor): value tensor of shape
+            (batch_size, nkvheads, max_kv_seqlen)
+        attn_mask (torch.Tensor): attention mask of shape
+            (batch_size, max_q_seqlen, max_kv_seqlen)
+    Returns:
+        output (torch.Tensor): attention result
+    """
+    if attn_mask is not None:
+        skip_mask = _skip_mask(attn_mask)
+        attn_mask = attn_mask.masked_fill(skip_mask, True)
+        attn_mask = attn_mask[:, None, :, :]
+
+    try:
+        output = nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+        )
+    except Exception:
+        # Can be removed when a bug leading to here has been fixed.
+        _log.debug(
+            "Fallback to SDPBackend.MATH backend",
+        )
+        with sdpa_kernel(SDPBackend.MATH):
+            output = nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+            )
+        
+    return output
+
+
 def _sdpa_or_flex_attention() -> Callable:
     """
     Helper function to decide when to call flex attention or SDPA. It will use
@@ -344,7 +398,7 @@ def _sdpa_or_flex_attention() -> Callable:
                 if is_flash_attn_available() and not with_kv_cache:
                     log_once(_log, "Using flash_attn", level=logging.DEBUG)
                     try:
-                        output = _flash_attn_wrapper(
+                        return _flash_attn_wrapper(
                             q,
                             k,
                             v,
@@ -359,34 +413,9 @@ def _sdpa_or_flex_attention() -> Callable:
                                 "to 'scaled_dot_product_attention'"
                             )
                         )
-                        if mask is not None:
-                            skip_mask = _skip_mask(mask)
-                            mask = mask.masked_fill(skip_mask, True)
-                            mask = mask[:, None, :, :]
-
-                        try:
-                            output = nn.functional.scaled_dot_product_attention(
-                                q,
-                                k,
-                                v,
-                                attn_mask=mask,
-                                dropout_p=dropout_p,
-                                is_causal=is_causal,
-                            )
-                        except Exception:
-                            _log.debug(
-                                "Using SDPBackend.MATH",
-                            )
-                            with sdpa_kernel(SDPBackend.MATH):
-                                output = nn.functional.scaled_dot_product_attention(
-                                    q,
-                                    k,
-                                    v,
-                                    attn_mask=mask,
-                                    dropout_p=dropout_p,
-                                    is_causal=is_causal,
-                                )
-                    return output
+                    return _safe_scaled_dot_product_attention(
+                        q, k, v, mask, dropout_p, is_causal
+                    )
                 else:
                     # shape: [b, 1, s, s]
                     if mask is not None:
@@ -415,7 +444,7 @@ def _sdpa_or_flex_attention() -> Callable:
             if is_flash_attn_available() and not with_kv_cache:
                 log_once(_log, "Using flash_attn", level=logging.DEBUG)
                 try:
-                    output = _flash_attn_wrapper(
+                    return _flash_attn_wrapper(
                         q,
                         k,
                         v,
@@ -430,34 +459,9 @@ def _sdpa_or_flex_attention() -> Callable:
                             "to 'scaled_dot_product_attention'"
                         )
                     )
-                    if mask is not None:
-                        skip_mask = _skip_mask(mask)
-                        mask = mask.masked_fill(skip_mask, True)
-                        mask = mask[:, None, :, :]
-
-                    try:
-                        output = nn.functional.scaled_dot_product_attention(
-                            q,
-                            k,
-                            v,
-                            attn_mask=mask,
-                            dropout_p=dropout_p,
-                            is_causal=is_causal,
-                        )
-                    except Exception:
-                        _log.debug(
-                            "Using SDPBackend.MATH",
-                        )
-                        with sdpa_kernel(SDPBackend.MATH):
-                            output = nn.functional.scaled_dot_product_attention(
-                                q,
-                                k,
-                                v,
-                                attn_mask=mask,
-                                dropout_p=dropout_p,
-                                is_causal=is_causal,
-                            )
-                return output
+                return _safe_scaled_dot_product_attention(
+                    q, k, v, mask, dropout_p, is_causal
+                )
             else:
                 # shape: [b, 1, s, s]
                 if mask is not None:
