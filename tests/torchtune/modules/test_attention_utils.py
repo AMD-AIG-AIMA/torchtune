@@ -13,12 +13,59 @@ import torch
 from tests.test_utils import gpu_test
 
 from torchtune.modules.attention_utils import (
+    _check,
     _get_document_ids_from_seq_lens,
     _sdpa_or_flex_attention,
     _SUPPORTS_FLEX_ATTENTION,
     create_block_causal_mask,
     packed_block_causal_mask,
 )
+
+
+class TestMaskCheck:
+    @pytest.fixture
+    def attn_mask(self):
+        return [
+            torch.tensor(
+                [
+                    [
+                        [1, 1],
+                        [1, 1],
+                        [1, 1],
+                    ],
+                    [
+                        [1, 0],
+                        [1, 0],
+                        [0, 0],
+                    ]
+                ]
+            ),
+            torch.tensor(
+                [
+                    [
+                        [1, 0],
+                        [1, 0],
+                        [0, 1],
+                    ],
+                    [
+                        [1, 0],
+                        [1, 0],
+                        [0, 0],
+                    ]
+                ]
+            ),
+        ]
+
+    def test_check(self):
+        actual = self.attn_mask()
+        expected = [False, True]
+
+        actual = [
+            _check(attn_mask)
+            for attn_mask in actual
+        ]
+
+        torch.testing.assert_close(actual, expected)
 
 
 class TestBlockCausalMask:
