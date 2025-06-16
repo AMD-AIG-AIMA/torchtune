@@ -13,12 +13,56 @@ import torch
 from tests.test_utils import gpu_test
 
 from torchtune.modules.attention_utils import (
+    _check,
     _get_document_ids_from_seq_lens,
     _sdpa_or_flex_attention,
     _SUPPORTS_FLEX_ATTENTION,
     create_block_causal_mask,
     packed_block_causal_mask,
 )
+
+
+class TestMaskCheck:
+    @pytest.fixture
+    def attn_mask(self):
+        return [
+            torch.tensor(
+                [
+                    [
+                        [1, 1],
+                        [1, 1],
+                        [1, 1],
+                    ],
+                    [
+                        [1, 0],
+                        [1, 0],
+                        [0, 0],
+                    ]
+                ],
+                dtype=bool
+            ),
+            torch.tensor(
+                [
+                    [
+                        [1, 0],
+                        [1, 0],
+                        [0, 1],
+                    ],
+                    [
+                        [1, 0],
+                        [1, 0],
+                        [0, 0],
+                    ]
+                ],
+                dtype=bool
+            ),
+        ]
+
+    def test_check(self, attn_mask):
+        expected = [torch.tensor(False, dtype=bool), torch.tensor(True, dtype=bool)]
+        actual = [_check(mask) for mask in attn_mask]
+
+        torch.testing.assert_close(actual, expected)
 
 
 class TestBlockCausalMask:
@@ -114,18 +158,19 @@ class TestSDPAOrFlexAttention:
         attn_mask = torch.ones(2, 3, 3)
         dropout_p = 0.0
         is_causal = False
+        with_kv_cache = False
 
         # Pretend that mask is actually a BlockMask
         with mock.patch(
             "torchtune.modules.attention_utils.isinstance", return_value=True
         ):
             _attention_call = _sdpa_or_flex_attention()
-            _ = _attention_call(q, k, v, attn_mask, dropout_p, is_causal)
+            _ = _attention_call(q, k, v, attn_mask, dropout_p, is_causal, with_kv_cache)
             mock_sdpa.assert_not_called()
             mock_flex.assert_called_with(q, k, v, block_mask=attn_mask)
         # If mask is not a BlockMask, then we should call SDPA
         _attention_call = _sdpa_or_flex_attention()
-        _ = _attention_call(q, k, v, attn_mask, dropout_p, is_causal)
+        _ = _attention_call(q, k, v, attn_mask, dropout_p, is_causal, with_kv_cache)
         mock_sdpa.assert_called_once()
         assert mock_flex.call_count == 1
 
@@ -141,6 +186,7 @@ class TestSDPAOrFlexAttention:
         attn_mask = torch.ones(2, 3, 3)
         dropout_p = 0.0
         is_causal = False
+        with_kv_cache = False
         _attention_call = _sdpa_or_flex_attention()
-        _ = _attention_call(q, k, v, attn_mask, dropout_p, is_causal)
+        _ = _attention_call(q, k, v, attn_mask, dropout_p, is_causal, with_kv_cache)
         mock_sdpa.assert_called_once()
