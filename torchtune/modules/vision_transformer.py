@@ -375,17 +375,25 @@ class VisionTransformer(nn.Module):
         # norm
         x = self.ln_pre(x)
 
-        # dummy padding for FAv3 ASM kernel: make seqlen divisible by 64
-        if is_flash_attn_available():
-            n_repeat = (64 - (n_tokens % 64)) % 64
-            x = torch.cat([x, torch.zeros((bsz_and_n_imgs, n_tiles, n_repeat, embed_dim), dtype=x.dtype, device=x.device)], dim=2)
-            n_tokens += n_repeat
-
         # transformer with optional hidden layer outputs
         x = x.reshape(bsz_and_n_imgs, n_tiles * n_tokens, embed_dim)
+
+        # dummy padding for FAv3 ASM kernel: make seqlen divisible by 64
+        if is_flash_attn_available():
+            n_repeat = (64 - ((n_tiles * n_tokens) % 64)) % 64
+            x = torch.cat(
+                [
+                    x,
+                    torch.zeros((bsz_and_n_imgs, n_repeat, embed_dim), dtype=x.dtype, device=x.device)
+                ],
+                dim=1
+            )
+
         for layer_idx, transformer_layer in enumerate(self.layers):
             if layer_idx in self.out_indices:
-                h = x.reshape(bsz, n_imgs, n_tiles, n_tokens, embed_dim)
+                h = x[:, : (n_tiles * n_tokens), :].reshape(
+                    bsz, n_imgs, n_tiles, n_tokens, embed_dim
+                )
                 hidden_states.append(h)
             x = transformer_layer(x)
 
@@ -394,11 +402,15 @@ class VisionTransformer(nn.Module):
 
         # post_tile_pos_embed
         if self.post_tile_pos_embed:
-            x = x.reshape(bsz_and_n_imgs, n_tiles, n_tokens, embed_dim)
+            x = x[:, : (n_tiles * n_tokens), :].reshape(
+                bsz_and_n_imgs, n_tiles, n_tokens, embed_dim
+            )
             x = self.post_tile_pos_embed(x, aspect_ratio)
 
         # reshape output
-        x = x.reshape(bsz, n_imgs, n_tiles, n_tokens, embed_dim)
+        x = x[:, : (n_tiles * n_tokens), :].reshape(
+            bsz, n_imgs, n_tiles, n_tokens, embed_dim
+        )
 
         # cls token projection. n_tokens becomes 1
         if self.cls_projection:
