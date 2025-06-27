@@ -9,6 +9,7 @@ from typing import List, Optional
 import torch
 
 from torch import nn
+from torchtune.modules.attention_utils import is_flash_attn_available
 from torchtune.modules.model_fusion import register_fusion_module
 
 
@@ -62,9 +63,21 @@ class Llama3VisionProjectionHead(nn.Module):
 
         # apply transformer layers
         x = x.view(bsz * imgs, tiles * embeds, dim)
+
+        # dummy padding for FAv3 ASM kernel: make seqlen divisible by 64
+        if is_flash_attn_available():
+            n_repeat = (64 - ((tiles * embeds) % 64)) % 64
+            x = torch.cat(
+                [
+                    x,
+                    torch.zeros((bsz * imgs, n_repeat, dim), dtype=x.dtype, device=x.device)
+                ],
+                dim=1
+            )
+
         for layer in self.layers:
             x = layer(x)
-        x = x.view(bsz, imgs, tiles, embeds, dim)
+        x = x[:, : (tiles * embeds), :].view(bsz, imgs, tiles, embeds, dim)
 
         # interleave hidden states and cat with x
         if self.num_hidden > 0:
