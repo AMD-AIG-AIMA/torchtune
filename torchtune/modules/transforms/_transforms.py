@@ -172,8 +172,7 @@ class VisionCrossAttentionMask(Transform):
             # to a single image, so text tokens attend to all the image's tokens.
             # The mask is text_seq_len x mask_image_size if defined, otherwise
             # it uses current text/image sequence lengths.
-            n_pads = (64 - (image_seq_len % 64)) % 64 if is_flash_attn_available() else 0
-            mask = torch.zeros(text_seq_len, image_seq_len+n_pads, dtype=torch.bool)
+            mask = torch.zeros(text_seq_len, image_seq_len, dtype=torch.bool)
             mask[start:end, :image_seq_len] = True
             masks.append(mask)
 
